@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: micapp-macos-arm64
+            binary: micapp-gui
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: micapp-macos-x86_64
+            binary: micapp-gui
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: micapp-windows-x86_64
+            binary: micapp-gui.exe
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: micapp-linux-x86_64
+            binary: micapp-gui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            pkg-config \
+            libgtk-3-dev \
+            libxdo-dev \
+            libappindicator3-dev
+
+      - name: Build release binary
+        run: cargo build --release --bin micapp-gui --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.binary }}" "${{ matrix.artifact }}.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

@@ -1,0 +1,25 @@
+[package]
+name = "micapp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Real-time microphone processing for Discord, OBS, and voice chat"
+
+[dependencies]
+auto-launch = "0.5"
+cpal = "0.15"
+eframe = "0.29"
+hound = "3"
+rfd = "0.14"
+ringbuf = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tray-icon = "0.19"
+
+[[bin]]
+name = "micapp"
+path = "src/main.rs"
+
+[[bin]]
+name = "micapp-gui"
+path = "src/bin/gui.rs"
