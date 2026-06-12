@@ -3,10 +3,12 @@
 // On Windows, don't open a console window when launching the GUI.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+use std::sync::{Arc, Mutex};
+
 use eframe::egui;
 use micapp::app::MicApp;
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{Menu, MenuItem},
     TrayIcon, TrayIconBuilder,
 };
 
@@ -41,9 +43,34 @@ fn tray_icon_rgba() -> (Vec<u8>, u32, u32) {
     (rgba, W, H)
 }
 
-fn build_tray() -> (TrayIcon, MenuItem, MenuItem) {
+#[derive(Debug, Clone, PartialEq)]
+enum TrayCmd { Show, Quit }
+
+fn build_tray(
+    pending: Arc<Mutex<Vec<TrayCmd>>>,
+    ctx_cell: Arc<Mutex<Option<egui::Context>>>,
+) -> TrayIcon {
     let show_item = MenuItem::new("Show", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
+
+    let show_id = show_item.id().clone();
+    let quit_id = quit_item.id().clone();
+
+    // Forward menu events into our shared queue and wake egui.
+    tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
+        let cmd = if event.id == show_id {
+            TrayCmd::Show
+        } else if event.id == quit_id {
+            TrayCmd::Quit
+        } else {
+            return;
+        };
+        pending.lock().unwrap().push(cmd);
+        if let Some(ctx) = ctx_cell.lock().unwrap().as_ref() {
+            ctx.request_repaint();
+        }
+    }));
+
     let menu = Menu::new();
     menu.append(&show_item).ok();
     menu.append(&quit_item).ok();
@@ -51,28 +78,25 @@ fn build_tray() -> (TrayIcon, MenuItem, MenuItem) {
     let (rgba, w, h) = tray_icon_rgba();
     let icon = tray_icon::Icon::from_rgba(rgba, w, h).expect("valid icon");
 
-    let tray = TrayIconBuilder::new()
+    TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("micapp — mic processing")
         .with_icon(icon)
         .build()
-        .expect("tray icon");
-
-    (tray, show_item, quit_item)
+        .expect("tray icon")
 }
 
 fn main() -> eframe::Result {
-    let (tray, show_item, quit_item) = build_tray();
-    let _tray = tray; // keep alive for the lifetime of the app
+    let pending: Arc<Mutex<Vec<TrayCmd>>> = Arc::new(Mutex::new(Vec::new()));
+    let ctx_cell: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
 
-    let show_id = show_item.id().clone();
-    let quit_id = quit_item.id().clone();
+    let _tray = build_tray(Arc::clone(&pending), Arc::clone(&ctx_cell));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("micapp")
             .with_inner_size([420.0, 720.0])
-            .with_visible(false), // start hidden in tray
+            .with_visible(false),
         ..Default::default()
     };
 
@@ -80,47 +104,47 @@ fn main() -> eframe::Result {
         "micapp",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(TrayApp::new(cc, show_id, quit_id)))
+            // Store the egui context so the event handler can wake it.
+            *ctx_cell.lock().unwrap() = Some(cc.egui_ctx.clone());
+            Ok(Box::new(TrayApp::new(cc, Arc::clone(&pending))))
         }),
     )
 }
 
 struct TrayApp {
     inner: MicApp,
-    show_id: tray_icon::menu::MenuId,
-    quit_id: tray_icon::menu::MenuId,
-    /// Set to true by the Quit menu item so the close handler lets it through.
+    pending: Arc<Mutex<Vec<TrayCmd>>>,
     quitting: bool,
 }
 
 impl TrayApp {
-    fn new(
-        cc: &eframe::CreationContext,
-        show_id: tray_icon::menu::MenuId,
-        quit_id: tray_icon::menu::MenuId,
-    ) -> Self {
-        Self { inner: MicApp::new(cc), show_id, quit_id, quitting: false }
+    fn new(cc: &eframe::CreationContext, pending: Arc<Mutex<Vec<TrayCmd>>>) -> Self {
+        Self { inner: MicApp::new(cc), pending, quitting: false }
     }
 }
 
 impl eframe::App for TrayApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.quit_id {
-                self.quitting = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-            if event.id == self.show_id {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // Drain tray commands queued by the event handler.
+        let cmds: Vec<TrayCmd> = std::mem::take(&mut *self.pending.lock().unwrap());
+        for cmd in cmds {
+            match cmd {
+                TrayCmd::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                TrayCmd::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
             }
         }
 
         // Intercept window close — hide to tray unless Quit was clicked.
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.quitting {
-                return; // let egui close normally
+                return;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -129,6 +153,7 @@ impl eframe::App for TrayApp {
 
         self.inner.update(ctx, frame);
 
+        // Keep ticking when hidden so tray events wake us promptly.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
