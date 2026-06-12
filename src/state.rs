@@ -100,9 +100,18 @@ impl Default for Settings {
 
 /// Return the platform-appropriate path for the persistent config file.
 ///
-/// macOS : `~/Library/Application Support/micapp/config.toml`
-/// others: `~/.config/micapp/config.toml`  (XDG_CONFIG_HOME honoured)
+/// Windows : `%APPDATA%\micapp\config.toml`
+/// macOS   : `~/Library/Application Support/micapp/config.toml`
+/// Linux   : `$XDG_CONFIG_HOME/micapp/config.toml` or `~/.config/micapp/config.toml`
 pub fn config_path() -> std::path::PathBuf {
+    // Windows: use APPDATA — always set by the OS, even at login-startup.
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let mut p = std::path::PathBuf::from(appdata);
+        p.push("micapp\\config.toml");
+        return p;
+    }
+
     #[cfg(target_os = "macos")]
     if let Some(home) = std::env::var_os("HOME") {
         let mut p = std::path::PathBuf::from(home);

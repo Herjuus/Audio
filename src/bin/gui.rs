@@ -1,5 +1,7 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::collapsible_if)]
+// On Windows, don't open a console window when launching the GUI.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use eframe::egui;
 use micapp::app::MicApp;
@@ -8,7 +10,7 @@ use tray_icon::{
     TrayIcon, TrayIconBuilder,
 };
 
-// 16x16 RGBA mic icon — simple circle with a rectangle, all in green.
+// 16x16 RGBA mic icon — simple filled circle in green.
 fn tray_icon_rgba() -> (Vec<u8>, u32, u32) {
     const W: u32 = 16;
     const H: u32 = 16;
@@ -24,11 +26,8 @@ fn tray_icon_rgba() -> (Vec<u8>, u32, u32) {
             let dy = y as f32 + 0.5 - cy;
             let dist = (dx * dx + dy * dy).sqrt();
 
-            // Outer circle ring (mic body)
             let on = (dist >= 4.5 && dist <= 6.5)
-                // stem at bottom centre
                 || (dx.abs() < 1.0 && dy > 4.5 && dy < 7.0)
-                // base bar at bottom
                 || (dy > 6.0 && dy < 7.5 && dx.abs() < 2.5);
 
             if on {
@@ -63,23 +62,17 @@ fn build_tray() -> (TrayIcon, MenuItem, MenuItem) {
 }
 
 fn main() -> eframe::Result {
-    // Build tray before the event loop so it's visible immediately.
     let (tray, show_item, quit_item) = build_tray();
+    let _tray = tray; // keep alive for the lifetime of the app
 
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
-
-    // Keep tray alive for the duration of the app.
-    let _tray = tray;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("micapp")
             .with_inner_size([420.0, 720.0])
-            // Start hidden — user opens via tray.
-            .with_visible(false)
-            // Closing the window hides it instead of exiting.
-            .with_close_button(true),
+            .with_visible(false), // start hidden in tray
         ..Default::default()
     };
 
@@ -87,26 +80,7 @@ fn main() -> eframe::Result {
         "micapp",
         options,
         Box::new(move |cc| {
-            let ctx = cc.egui_ctx.clone();
-
-            // Poll tray menu events each frame via a repaint request.
-            // egui runs update() on repaint, so we hook a channel-check there.
-            let show_id = show_id.clone();
-            let quit_id = quit_id.clone();
-
-            // Spawn a thread that forwards tray events as egui repaints.
-            std::thread::spawn(move || {
-                let receiver = MenuEvent::receiver();
-                loop {
-                    if let Ok(event) = receiver.recv() {
-                        if event.id == show_id || event.id == quit_id {
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-            });
-
-            Ok(Box::new(TrayApp::new(cc, show_item.id().clone(), quit_item.id().clone())))
+            Ok(Box::new(TrayApp::new(cc, show_id, quit_id)))
         }),
     )
 }
@@ -115,6 +89,8 @@ struct TrayApp {
     inner: MicApp,
     show_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
+    /// Set to true by the Quit menu item so the close handler lets it through.
+    quitting: bool,
 }
 
 impl TrayApp {
@@ -123,19 +99,15 @@ impl TrayApp {
         show_id: tray_icon::menu::MenuId,
         quit_id: tray_icon::menu::MenuId,
     ) -> Self {
-        Self {
-            inner: MicApp::new(cc),
-            show_id,
-            quit_id,
-        }
+        Self { inner: MicApp::new(cc), show_id, quit_id, quitting: false }
     }
 }
 
 impl eframe::App for TrayApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Handle tray menu events.
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.quit_id {
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
@@ -145,13 +117,18 @@ impl eframe::App for TrayApp {
             }
         }
 
-        // Intercept close — hide to tray instead of quitting.
+        // Intercept window close — hide to tray unless Quit was clicked.
         if ctx.input(|i| i.viewport().close_requested()) {
+            if self.quitting {
+                return; // let egui close normally
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             return;
         }
 
         self.inner.update(ctx, frame);
+
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
